@@ -77,7 +77,7 @@ class BaseGrandCanonicalMonteCarloSampler(object):
         self.positions = None  # Store no positions upon initialisation
         self.context = None
         self.kT = unit.BOLTZMANN_CONSTANT_kB * unit.AVOGADRO_CONSTANT_NA * temperature
-        self.simulation_box = np.zeros(3) * unit.nanometer  # Set to zero for now
+        self.simulation_box = np.zeros((3,3)) * unit.nanometer  # Set to zero for now
 
         self.logger.info("kT = {}".format(self.kT.in_units_of(unit.kilocalorie_per_mole)))
 
@@ -688,19 +688,20 @@ class GCMCSphereSampler(BaseGrandCanonicalMonteCarloSampler):
         self.sphere_centre = np.zeros(3) * unit.nanometers
         for i, atom in enumerate(self.ref_atoms):
             # Need to add on a correction in case the atoms get separated
-            correction = np.zeros(3) * unit.nanometers
+            correction = np.zeros(3)
             if i != 0:
                 # Vector from the first reference atom
                 vec = self.positions[self.ref_atoms[0]] - self.positions[atom]
+                proj = np.matmul(vec, np.linalg.inv(self.simulation_box))
                 # Correct for PBCs
                 for j in range(3):
-                    if vec[j] > 0.5 * self.simulation_box[j]:
-                        correction[j] = self.simulation_box[j]
-                    elif vec[j] < -0.5 * self.simulation_box[j]:
-                        correction[j] = -self.simulation_box[j]
+                    if proj[j] > 0.5:
+                        correction[j] = 1.0
+                    elif vec[j] < -0.5:
+                        correction[j] = -1.0
 
             # Add vector and correction onto the running sum
-            self.sphere_centre += self.positions[atom] + correction
+            self.sphere_centre += self.positions[atom] + np.matmul(correction, self.simulation_box)*unit.nanometers
 
         # Calculate the average coordinate
         self.sphere_centre /= len(self.ref_atoms)
@@ -726,24 +727,20 @@ class GCMCSphereSampler(BaseGrandCanonicalMonteCarloSampler):
         # Load in positions and box vectors from context
         state = self.context.getState(getPositions=True, enforcePeriodicBox=True)
         self.positions = deepcopy(state.getPositions(asNumpy=True))
-        box_vectors = state.getPeriodicBoxVectors(asNumpy=True)
+        self.simulation_box = state.getPeriodicBoxVectors(asNumpy=True)
 
         # Check the symmetry of the box - currently only tolerate cuboidal boxes
         # All off-diagonal box vector components must be zero
-        for i in range(3):
-            for j in range(3):
-                if i == j:
-                    continue
-                if not np.isclose(box_vectors[i, j]._value, 0.0):
-                    self.raiseError("grand only accepts cuboidal simulation cells at this time.")
-
-        self.simulation_box = np.array([box_vectors[0, 0]._value,
-                                        box_vectors[1, 1]._value,
-                                        box_vectors[2, 2]._value]) * unit.nanometer
+        #for i in range(3):
+        #    for j in range(3):
+        #        if i == j:
+        #            continue
+        #        if not np.isclose(box_vectors[i, j]._value, 0.0):
+        #            self.raiseError("grand only accepts cuboidal simulation cells at this time.")
 
         # Check size of the GCMC sphere, relative to the box
         for i in range(3):
-            if self.sphere_radius > 0.5 * self.simulation_box[i]:
+            if self.sphere_radius > 0.5 * np.linalg.norm(self.simulation_box[i]) * unit.nanometers:
                 self.raiseError("GCMC sphere radius cannot be larger than half a box length.")
 
         # Calculate the centre of the GCMC sphere, if using reference atoms
@@ -760,11 +757,13 @@ class GCMCSphereSampler(BaseGrandCanonicalMonteCarloSampler):
 
             vector = self.positions[ox_index] - self.sphere_centre
             # Correct PBCs of this vector - need to make this part cleaner
+            proj = np.matmul(vector, np.linalg.inv(self.simulation_box))
             for i in range(3):
-                if vector[i] >= 0.5 * self.simulation_box[i]:
-                    vector[i] -= self.simulation_box[i]
-                elif vector[i] <= -0.5 * self.simulation_box[i]:
-                    vector[i] += self.simulation_box[i]
+                if proj[i] >= 0.5:
+                    proj[i] -= 1.0
+                elif proj[i] <= -0.5:
+                    proj[i] += 1.0
+            vector = np.matmul(proj, self.simulation_box)
 
             # Set the status of this water as appropriate
             if np.linalg.norm(vector) * unit.nanometer <= self.sphere_radius:
@@ -841,10 +840,7 @@ class GCMCSphereSampler(BaseGrandCanonicalMonteCarloSampler):
         if self.ref_atoms is not None:
             self.getSphereCentre()
 
-        box_vectors = state.getPeriodicBoxVectors(asNumpy=True)
-        self.simulation_box = np.array([box_vectors[0, 0]._value,
-                                        box_vectors[1, 1]._value,
-                                        box_vectors[2, 2]._value]) * unit.nanometer
+        self.simulation_box = state.getPeriodicBoxVectors(asNumpy=True)
 
         # Check which waters are in the GCMC region
         all_res = list(self.topology.residues())
@@ -856,12 +852,15 @@ class GCMCSphereSampler(BaseGrandCanonicalMonteCarloSampler):
                 break
             ox_idxs.append(ox_idx)
             ox_positions.append(self.positions[ox_idx])
-        ox_positions_arr = np.array(ox_positions)*unit.nanometer
+        ox_positions_arr = np.array(ox_positions)*unit.nanometer - self.sphere_centre
+        ox_positions_proj = np.matmul(ox_positions_arr,np.linalg.inv(self.simulation_box))
 
         for i in range(3):
-            ox_positions_arr[:, i] -= self.sphere_centre[i]
-            ox_positions_arr[: , i][ox_positions_arr[:,i] >= 0.5 * self.simulation_box[i]] -= self.simulation_box[i]
-            ox_positions_arr[: , i][ox_positions_arr[:,i] <= -0.5 * self.simulation_box[i]] += self.simulation_box[i]
+            #ox_positions_arr[:, i] -= self.sphere_centre[i]
+            ox_positions_proj[: , i][ox_positions_proj[:,i] >= 0.5] -= 1.0
+            ox_positions_proj[: , i][ox_positions_proj[:,i] <= -0.5] += 1.0
+        ox_positions_arr = np.matmul(ox_positions_proj, self.simulation_box)
+
         distances = np.linalg.norm(ox_positions_arr, axis=1)*unit.nanometer
 
         places = (distances<=self.sphere_radius)
@@ -1565,10 +1564,10 @@ class GCMCSystemSampler(BaseGrandCanonicalMonteCarloSampler):
                                                      dcd=dcd, rst=rst, overwrite=overwrite)
 
         # Read in simulation box lengths
-        self.simulation_box = np.array([boxVectors[0, 0]._value,
-                                        boxVectors[1, 1]._value,
-                                        boxVectors[2, 2]._value]) * unit.nanometer
-        volume = self.simulation_box[0] * self.simulation_box[1] * self.simulation_box[2]
+        #self.simulation_box = np.array([boxVectors[0, 0]._value,
+        #                                boxVectors[1, 1]._value,
+        #                                boxVectors[2, 2]._value]) * unit.nanometer
+        volume = boxVectors[0, 0]._value * boxVectors[1, 1]._value * boxVectors[2, 2]._value
 
         # Set or calculate the Adams value for the simulation
         if adams is not None:
@@ -1601,20 +1600,16 @@ class GCMCSystemSampler(BaseGrandCanonicalMonteCarloSampler):
         # Load in positions and box vectors from context
         state = self.context.getState(getPositions=True, enforcePeriodicBox=True)
         self.positions = deepcopy(state.getPositions(asNumpy=True))
-        box_vectors = state.getPeriodicBoxVectors(asNumpy=True)
+        self.simulation_box = state.getPeriodicBoxVectors(asNumpy=True)
 
         # Check the symmetry of the box - currently only tolerate cuboidal boxes
         # All off-diagonal box vector components must be zero
-        for i in range(3):
-            for j in range(3):
-                if i == j:
-                    continue
-                if not np.isclose(box_vectors[i, j]._value, 0.0):
-                    self.raiseError("grand only accepts cuboidal simulation cells at this time.")
-
-        self.simulation_box = np.array([box_vectors[0, 0]._value,
-                                        box_vectors[1, 1]._value,
-                                        box_vectors[2, 2]._value]) * unit.nanometer
+        #for i in range(3):
+        #    for j in range(3):
+        #        if i == j:
+        #            continue
+        #        if not np.isclose(box_vectors[i, j]._value, 0.0):
+        #            self.raiseError("grand only accepts cuboidal simulation cells at this time.")
 
         # Delete ghost waters
         self.deleteGhostWaters(ghostResids)
@@ -1649,7 +1644,7 @@ class GCMCSystemSampler(BaseGrandCanonicalMonteCarloSampler):
         for atom in all_res[insert_water].atoms():
             atom_indices.append(atom.index)
         # Select a point to insert the water (based on O position)
-        insert_point = np.random.rand(3) * self.simulation_box
+        insert_point = np.matmul(np.random.rand(3),self.simulation_box)*unit.nanometer
         #  Generate a random rotation matrix
         R = random_rotation_matrix()
         new_positions = deepcopy(self.positions)

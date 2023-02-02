@@ -129,10 +129,11 @@ def add_ghosts(topology, positions, ff='tip3p', n=10, pdb='gcmc-extra-wats.pdb')
         chain_ids.append(chain.id)
 
     # Read in simulation box size
-    box_vectors = topology.getPeriodicBoxVectors()
-    box_size = np.array([box_vectors[0][0]._value,
-                         box_vectors[1][1]._value,
-                         box_vectors[2][2]._value]) * unit.nanometer
+    box_vectors = np.asarray(topology.getPeriodicBoxVectors()._value)
+    print(box_vectors)
+    #box_size = np.array([box_vectors[0][0]._value,
+    #                     box_vectors[1][1]._value,
+    #                     box_vectors[2][2]._value]) * unit.nanometer
 
     # Load topology of water model
     assert ff.lower() == "tip3p", "Water model must be TIP3P!"
@@ -140,13 +141,13 @@ def add_ghosts(topology, positions, ff='tip3p', n=10, pdb='gcmc-extra-wats.pdb')
 
     # Add multiple copies of the same water, then write out a pdb (for visualisation)
     ghosts = []
-    translation = np.array([xmin, ymin, zmin]) * unit.nanometer
+    translation = np.array([xmin, ymin, zmin])
     for i in range(n):
         # Read in template water positions
         positions = water.positions
 
         # Need to translate the water to a random point in the simulation box
-        new_centre = (np.random.rand(3)) * box_size + translation
+        new_centre = (np.matmul(np.random.rand(3), box_vectors) + translation) * unit.nanometer
         new_positions = deepcopy(water.positions)
         for i in range(len(positions)):
             new_positions[i] = positions[i] + new_centre - positions[0]
@@ -562,7 +563,7 @@ def wrap_waters(topology=None, trajectory=None, t=None, output=None):
     if t is None:
         t = mdtraj.load(trajectory, top=topology, discard_overlapping_frames=False)
 
-    n_frames, n_atoms, n_dims = t.xyz.shape
+    n_frames = t.xyz.shape
 
     # Fix all frames
     for f in range(n_frames):
@@ -577,16 +578,19 @@ def wrap_waters(topology=None, trajectory=None, t=None, output=None):
                     pos = t.xyz[f, atom.index, :]
 
             # Calculate the correction vector based on the separation
-            box = t.unitcell_lengths[f, :]
+            box = t.unitcell_vectors[f, :]
 
-            new_pos = deepcopy(pos)
+            #Convert ref coords into non-orthogonal basis, put into box, then convert correction back
+            proj = np.matmul(pos,np.linalg.inv(box))
+
+            new_proj = deepcopy(new_proj)
             for i in range(3):
-                while new_pos[i] >= box[i]:
-                    new_pos[i] -= box[i]
-                while new_pos[i] <= 0:
-                    new_pos[i] += box[i]
+                while new_proj[i] >= 1.0:
+                    new_proj[i] -= 1.0
+                while new_proj[i] <= 0:
+                    new_proj[i] += 1.0
 
-            correction = new_pos - pos
+            correction = np.matmul(new_proj - proj, box)
 
             # Apply the correction vector to each atom in the residue
             for atom in residue.atoms:
@@ -697,7 +701,7 @@ def recentre_traj(topology=None, trajectory=None, t=None, name='CA', resname='AL
     # Fix all frames
     for f in range(n_frames):
         # Box dimensions for this frame
-        box = t.unitcell_lengths[f, :]
+        box = t.unitcell_vectors[f, :]
 
         # Recentre all protein chains
         for chain in t.topology.chains:
@@ -715,13 +719,16 @@ def recentre_traj(topology=None, trajectory=None, t=None, name='CA', resname='AL
                         min_dists[i] = v[i]
 
             # Calculate the correction vector based on the separation
-            correction = np.zeros(3)
+            proj = np.matmul(min_dists,np.linalg.inv(box))
+            proj_correction = np.zeros(3)
 
             for i in range(3):
-                if -2 * box[i] < min_dists[i] < -0.5 * box[i]:
-                    correction[i] += box[i]
-                elif 0.5 * box[i] < min_dists[i] < 2 * box[i]:
-                    correction[i] -= box[i]
+                if -2.0 < proj[i] < -0.5:
+                    proj_correction[i] += 1.0
+                elif 0.5 < proj[i] < 2.0:
+                    proj_correction[i] -= 1.0
+            
+            correction = np.matmul(proj_correction,box)
 
             # Apply the correction vector to each atom in the residue
             for atom in chain.atoms:
@@ -743,13 +750,16 @@ def recentre_traj(topology=None, trajectory=None, t=None, name='CA', resname='AL
                         min_dists[i] = v[i]
 
             # Calculate the correction vector based on the separation
-            correction = np.zeros(3)
+            proj = np.matmul(min_dists,np.linalg.inv(box))
+            proj_correction = np.zeros(3)
 
             for i in range(3):
-                if -2 * box[i] < min_dists[i] < -0.5 * box[i]:
-                    correction[i] += box[i]
-                elif 0.5 * box[i] < min_dists[i] < 2 * box[i]:
-                    correction[i] -= box[i]
+                if -2.0 < proj[i] < -0.5:
+                    proj_correction[i] += 1.0
+                elif 0.5 < proj[i] < 2.0:
+                    proj_correction[i] -= 1.0
+            
+            correction = np.matmul(proj_correction,box)
 
             # Apply the correction vector to each atom in the residue
             for atom in residue.atoms:
