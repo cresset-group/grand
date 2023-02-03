@@ -563,7 +563,7 @@ def wrap_waters(topology=None, trajectory=None, t=None, output=None):
     if t is None:
         t = mdtraj.load(trajectory, top=topology, discard_overlapping_frames=False)
 
-    n_frames = t.xyz.shape
+    n_frames = t.xyz.shape[0]
 
     # Fix all frames
     for f in range(n_frames):
