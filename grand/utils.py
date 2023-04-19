@@ -156,9 +156,20 @@ def add_ghosts(topology, positions, ff='tip3p', n=10, pdb='gcmc-extra-wats.pdb')
         modeller.add(addTopology=water.topology, addPositions=new_positions)
         ghosts.append(modeller.topology._numResidues - 1)
 
-    # Take the ghost chain as the one after the last chain (alphabetically)
-    new_chain = chr(((ord(chain_ids[-1]) - 64) % 26) + 65)
-
+    # Find a chain letter for the ghost chain.
+    # Need to be careful here as openmm.app.modeller.addSolvent can add water
+    # chains with two characters in, so the original algorithm to increment the
+    # chain letter for the last atom fails (e.g. on chain '10').
+    # If none found, assign to chain '_'
+    new_chain='_'
+    # Valid chain letters are A-Z, a-z and 0-9
+    valid_chain_letters = [chr(a) for a in list(range(65,91)) + 
+            list(range(97,123)) + list(range(48,58))]
+    for chain_try in valid_chain_letters:
+        if chain_try not in chain_ids:
+            new_chain=chain_try
+            break
+        
     # Renumber all ghost waters and assign them to the new chain
     for resid, residue in enumerate(modeller.topology.residues()):
         if resid in ghosts:
